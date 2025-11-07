@@ -30,7 +30,7 @@ from yt_dlp import YoutubeDL  # type: ignore  # local package import
 
 
 def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Return a curated set of progressive formats for the dropdown."""
+    """Return a curated, de-duplicated set of progressive formats for the dropdown."""
     formats = info.get("formats") or []
     progressive = [
         fmt
@@ -39,28 +39,34 @@ def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         and fmt.get("acodec") not in (None, "none")
         and fmt.get("format_id")
     ]
-    progressive.sort(
+
+    best_per_bucket: Dict[tuple, Dict[str, Any]] = {}
+    for fmt in progressive:
+        bucket = (
+            fmt.get("height"),
+            int(fmt.get("fps") or 0),
+            fmt.get("dynamic_range"),
+            fmt.get("ext"),
+        )
+        current_best = best_per_bucket.get(bucket)
+        if current_best is None or (fmt.get("tbr") or 0) > (current_best.get("tbr") or 0):
+            best_per_bucket[bucket] = fmt
+
+    deduped = sorted(
+        best_per_bucket.values(),
         key=lambda fmt: ((fmt.get("height") or 0), (fmt.get("fps") or 0), (fmt.get("tbr") or 0)),
         reverse=True,
     )
 
     options: List[Dict[str, Any]] = []
-    seen_ids = set()
-    for fmt in progressive:
-        format_id = fmt["format_id"]
-        if format_id in seen_ids:
-            continue
-        label = describe_format(fmt)
+    for fmt in deduped[:12]:
         options.append(
             {
-                "id": format_id,
-                "label": label,
+                "id": fmt["format_id"],
+                "label": describe_format(fmt),
                 "ext": fmt.get("ext", info.get("ext", "mp4")),
             }
         )
-        seen_ids.add(format_id)
-        if len(options) >= 12:
-            break
 
     if not options:
         options.append(
@@ -86,9 +92,18 @@ def describe_format(fmt: Dict[str, Any]) -> str:
         if fps:
             res_label += f"{int(fps)}"
     else:
-        res_label = resolution or ""
+        res_label = resolution or "Video"
 
-    parts = [res_label.strip(), note]
+    parts = [res_label.strip()]
+    if note and note.lower() not in {"dash video", "dash audio", "default"}:
+        parts.append(note)
+    ext = fmt.get("ext")
+    if ext:
+        parts.append(ext)
+    bitrate = fmt.get("tbr")
+    if bitrate:
+        parts.append(f"{round(bitrate / 1000, 1)} Mbps")
+
     label = " • ".join(part for part in parts if part)
     return label or str(fmt.get("format_id", "unknown"))
 
@@ -131,23 +146,26 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_api(self, parsed) -> None:
-        if parsed.path != "/api/video-info":
+        if parsed.path == "/api/video-info":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            if not url:
+                self._send_json({"error": "Missing url parameter"}, HTTPStatus.BAD_REQUEST)
+                return
+
+            try:
+                payload = self._extract_info(url)
+            except Exception as exc:  # pragma: no cover - surface raw error to caller
+                self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+
+            self._send_json(payload, HTTPStatus.OK)
+        elif parsed.path == "/api/default-path":
+            default_path = str((Path.home() / "Downloads").expanduser())
+            self._send_json({"path": default_path}, HTTPStatus.OK)
+        else:
             self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
             return
-
-        params = parse_qs(parsed.query)
-        url = (params.get("url") or [""])[0].strip()
-        if not url:
-            self._send_json({"error": "Missing url parameter"}, HTTPStatus.BAD_REQUEST)
-            return
-
-        try:
-            payload = self._extract_info(url)
-        except Exception as exc:  # pragma: no cover - surface raw error to caller
-            self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-
-        self._send_json(payload, HTTPStatus.OK)
 
     def _serve_static(self, path: str) -> None:
         requested = "index.html" if path in ("", "/") else path.lstrip("/")

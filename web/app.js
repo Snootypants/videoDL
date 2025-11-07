@@ -1,10 +1,12 @@
 const API_BASE = 'http://127.0.0.1:5050';
+const DEFAULT_SAVE_PATH = '~/Downloads';
 let videoInfoMode = 'auto'; // auto -> try API first, then fall back to mock
 const downloadMode = 'mock'; // keep downloads mocked until the endpoint exists
 
 const selectors = {
   url: document.getElementById('video-url'),
   location: document.getElementById('save-location'),
+  changeLocation: document.getElementById('change-location'),
   quality: document.getElementById('quality'),
   downloadBtn: document.getElementById('download-btn'),
   statusPill: document.getElementById('status-pill'),
@@ -17,6 +19,9 @@ const selectors = {
 };
 
 let fetchTimeout = null;
+setDefaultSaveLocation();
+selectors.changeLocation.addEventListener('click', promptForLocation);
+fetchDefaultPathFromApi();
 
 selectors.url.addEventListener('input', () => {
   selectors.downloadBtn.disabled = true;
@@ -199,6 +204,35 @@ async function requestDownload(payload) {
   }
 
   return response.json();
+}
+
+function setDefaultSaveLocation(path = DEFAULT_SAVE_PATH) {
+  selectors.location.value = path;
+}
+
+async function fetchDefaultPathFromApi() {
+  try {
+    const response = await fetch(`${API_BASE}/api/default-path`);
+    if (!response.ok) {
+      throw new Error('Default path request failed');
+    }
+    const data = await response.json();
+    if (data?.path) {
+      setDefaultSaveLocation(data.path);
+    }
+  } catch (error) {
+    console.warn('Falling back to default save path:', error);
+    setDefaultSaveLocation();
+  }
+}
+
+function promptForLocation() {
+  const suggestion = selectors.location.value || DEFAULT_SAVE_PATH;
+  const userPath = window.prompt('Select download destination', suggestion);
+  if (!userPath) {
+    return;
+  }
+  setDefaultSaveLocation(userPath.trim());
 }
 
 // --- Mock helpers below keep the UI interactive until endpoints exist ---

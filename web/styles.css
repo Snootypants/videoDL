@@ -96,6 +96,42 @@ button:not(:disabled):hover {
   box-shadow: 0 12px 30px rgba(63, 185, 80, 0.35);
 }
 
+select option {
+  color: #0e1117;
+  background-color: #f0f3f6;
+}
+
+select option:disabled {
+  color: rgba(14, 17, 23, 0.45);
+}
+
+.save-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem;
+}
+
+.save-row input {
+  width: 100%;
+}
+
+.ghost-button {
+  margin-top: 0;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.ghost-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
 .video-meta {
   display: grid;
   gap: 1rem;
