@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Video Downloader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <h1>Video Downloader</h1>
+      <form id="download-form" autocomplete="off">
+        <div class="field">
+          <label for="video-url">YouTube URL</label>
+          <input id="video-url" name="url" type="url" placeholder="Enter video URL here" required>
+        </div>
+
+        <div class="field">
+          <label for="save-location">Save Location</label>
+          <input id="save-location" name="path" type="text" placeholder="/Users/me/Videos/" required>
+        </div>
+
+        <div class="field">
+          <label for="quality">Video Quality</label>
+          <select id="quality" name="quality" disabled>
+            <option value="">Select a video first</option>
+          </select>
+        </div>
+
+        <button id="download-btn" type="submit" disabled>Download Video</button>
+
+        <div class="progress-shell">
+          <div class="status-line">
+            <span class="pill" id="status-pill">Idle</span>
+            <span id="percent-label">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel video-meta">
+      <div class="meta-heading">Video Preview</div>
+      <div class="meta-block" id="video-summary">
+        <div
+          class="preview-image"
+          id="video-image"
+          data-empty="true"
+          data-label="Paste a URL to preview"
+          aria-label="Video thumbnail preview"
+        ></div>
+        <div class="meta-title" id="video-title">Paste a URL to preview</div>
+        <div class="meta-desc" id="video-description">
+          The title, description, duration, and available formats will appear here after we fetch details for the provided URL.
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
