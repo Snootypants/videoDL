@@ -1,6 +1,15 @@
 # VideoDL
 
-Local, no-API-key video downloader with a clean web UI backed by `yt-dlp`.
+Local, no-API-key video downloader with a clean web UI backed by [`yt-dlp`](https://github.com/yt-dlp/yt-dlp).
+
+## Quick Start
+```bash
+git clone https://github.com/Snootypants/videoDL.git && cd videoDL
+git submodule update --init --recursive
+brew install ffmpeg  # or: apt-get install ffmpeg / choco install ffmpeg
+python web/server.py --port 5050
+python -m webbrowser http://127.0.0.1:5050
+```
 
 ## Highlights
 - Web UI that previews metadata and formats
@@ -17,7 +26,7 @@ Browser UI (web/index.html)
 ```
 
 ## Requirements
-- Python 3.10+
+- Python 3.10+ (check with `python3 --version`)
 - `ffmpeg` available on your PATH
 - Git submodules initialized (`yt-dlp`)
 
@@ -44,12 +53,14 @@ Windows (Chocolatey):
 ```powershell
 choco install ffmpeg
 ```
-Or download a static build and add `ffmpeg` to your PATH.
+Or download a static build from [ffmpeg.org](https://ffmpeg.org/download.html) and add `ffmpeg` to your PATH.
 
 ## Run
 ```bash
 python web/server.py --port 5050
 ```
+
+The server hosts both the web UI and API endpoints, so you do not need to open `web/index.html` directly.
 
 Open the UI:
 ```
@@ -58,11 +69,11 @@ http://127.0.0.1:5050
 
 ## Usage
 1. Paste a YouTube URL.
-2. Pick language and quality.
+2. Pick language (some videos have multiple audio tracks) and quality.
 3. Click **Download Video**.
 
-The server saves files as `%(title)s.%(ext)s` in the directory sent by the UI.
-If no path is provided, it defaults to `~/Downloads`.
+The UI currently sends a hidden save location that defaults to `~/Downloads` and is not user-configurable yet.
+The server saves files as `%(title)s.%(ext)s` in that directory.
 
 ## Troubleshooting
 - **403 Forbidden from YouTube**
