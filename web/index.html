@@ -16,9 +16,13 @@
           <input id="video-url" name="url" type="url" placeholder="Enter video URL here" required>
         </div>
 
+        <input id="save-location" name="path" type="hidden">
+
         <div class="field">
-          <label for="save-location">Save Location</label>
-          <input id="save-location" class="readonly-input" name="path" type="text" placeholder="~/Downloads" readonly>
+          <label for="language">Language</label>
+          <select id="language" name="language" disabled>
+            <option value="">Select a video first</option>
+          </select>
         </div>
 
         <div class="field">
@@ -38,6 +42,10 @@
           <div class="progress-bar">
             <div class="progress-fill" id="progress-fill"></div>
           </div>
+        </div>
+
+        <div class="download-note" id="download-note">
+          Videos save to your Downloads folder.
         </div>
       </form>
     </section>
