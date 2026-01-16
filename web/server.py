@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import re
 import sys
+import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,7 @@ for path in (PROJECT_ROOT, YTDLP_SOURCE):
         sys.path.insert(0, path_str)
 
 from yt_dlp import YoutubeDL  # type: ignore  # local package import
+from yt_dlp.cookies import SUPPORTED_BROWSERS, SUPPORTED_KEYRINGS  # type: ignore
 
 
 def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -47,6 +50,7 @@ def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
             int(fmt.get("fps") or 0),
             fmt.get("dynamic_range"),
             fmt.get("ext"),
+            fmt.get("language") or "und",
         )
         current_best = best_per_bucket.get(bucket)
         if current_best is None or (fmt.get("tbr") or 0) > (current_best.get("tbr") or 0):
@@ -65,6 +69,7 @@ def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "id": fmt["format_id"],
                 "label": describe_format(fmt),
                 "ext": fmt.get("ext", info.get("ext", "mp4")),
+                "language": fmt.get("language") or "und",
             }
         )
 
@@ -107,6 +112,23 @@ def describe_format(fmt: Dict[str, Any]) -> str:
     label = " • ".join(part for part in parts if part)
     return label or str(fmt.get("format_id", "unknown"))
 
+
+def build_language_options(info: Dict[str, Any]) -> List[Dict[str, str]]:
+    formats = info.get("formats") or []
+    languages: Dict[str, Dict[str, str]] = {}
+    for fmt in formats:
+        code = fmt.get("language") or "und"
+        if code in languages:
+            continue
+        label = fmt.get("language_preference") or fmt.get("language_name")
+        if not label:
+            label = code if code != "und" else "Unknown"
+        languages[code] = {"code": code, "label": label}
+
+    ordered = list(languages.values())
+    ordered.sort(key=lambda item: (item["code"] != "en", item["label"]))
+    return ordered
+
 def pick_thumbnail(info: Dict[str, Any]) -> Optional[str]:
     """Choose the highest-resolution thumbnail URL available."""
     if info.get("thumbnail"):
@@ -128,6 +150,12 @@ def pick_thumbnail(info: Dict[str, Any]) -> Optional[str]:
 
 class VideoInfoHandler(BaseHTTPRequestHandler):
     server_version = "VideoDLServer/0.1"
+    ydl_auth_opts: Dict[str, Any] = {}
+    base_ydl_opts: Dict[str, Any] = {
+        "quiet": True,
+        "nocheckcertificate": True,
+        "no_warnings": True,
+    }
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         parsed = urlparse(self.path)
@@ -136,6 +164,14 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             return
 
         self._serve_static(parsed.path or "/")
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/download":
+            self._handle_download()
+            return
+
+        self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003 - keeping name for BaseHTTPRequestHandler
         sys.stdout.write(
@@ -167,6 +203,40 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
             return
 
+    def _handle_download(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "Invalid JSON payload"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        url = (payload.get("url") or "").strip()
+        quality = (payload.get("quality") or "").strip()
+        target = (payload.get("path") or "").strip()
+        language = (payload.get("language") or "").strip()
+
+        if not url:
+            self._send_json({"error": "Missing url"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        save_dir = self._resolve_save_dir(target)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            result = self._download_video(url, quality, save_dir)
+        except Exception as exc:  # pragma: no cover - surfaces yt-dlp errors
+            traceback.print_exc()
+            self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        self._send_json(result, HTTPStatus.OK)
+
     def _serve_static(self, path: str) -> None:
         requested = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (WEB_ROOT / requested).resolve()
@@ -189,12 +259,7 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _extract_info(self, url: str) -> Dict[str, Any]:
-        ydl_opts = {
-            "quiet": True,
-            "skip_download": True,
-            "nocheckcertificate": True,
-            "no_warnings": True,
-        }
+        ydl_opts = self._compose_ydl_opts(skip_download=True)
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
@@ -205,7 +270,39 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             "duration": info.get("duration"),
             "formats": build_format_options(info),
             "thumbnail": pick_thumbnail(info),
+            "languages": build_language_options(info),
         }
+
+    def _download_video(self, url: str, quality: str, save_dir: Path) -> Dict[str, Any]:
+        if quality:
+            fmt = f"{quality}/bestvideo+bestaudio/best"
+        else:
+            fmt = "bestvideo+bestaudio/best"
+        output_template = str(save_dir / "%(title)s.%(ext)s")
+        ydl_opts = self._compose_ydl_opts(
+            format=fmt,
+            outtmpl=output_template,
+            paths={"home": str(save_dir)},
+            merge_output_format="mp4",
+            noprogress=True,
+        )
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+        return {
+            "status": "ok",
+            "title": info.get("title"),
+            "filepath": filename,
+            "format_id": info.get("format_id"),
+        }
+
+    def _resolve_save_dir(self, provided: str) -> Path:
+        if provided:
+            path = Path(provided).expanduser()
+        else:
+            path = Path.home() / "Downloads"
+        return path
 
     def _send_json(self, payload: Dict[str, Any], status: HTTPStatus) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -216,16 +313,93 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _compose_ydl_opts(self, **overrides: Any) -> Dict[str, Any]:
+        opts: Dict[str, Any] = dict(self.base_ydl_opts)
+        opts.update(self.ydl_auth_opts)
+        opts.update(overrides)
+        return opts
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local API server for the video downloader UI.")
     parser.add_argument("--host", default="127.0.0.1", help="Interface to bind (default: %(default)s)")
     parser.add_argument("--port", type=int, default=5050, help="Port to bind (default: %(default)s)")
-    return parser.parse_args()
+    parser.add_argument(
+        "--cookies-file",
+        dest="cookies_file",
+        help="Path to a Netscape cookies.txt file to forward to yt-dlp for authenticated requests.",
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        dest="cookies_from_browser",
+        metavar="SPEC",
+        help=(
+            "Load cookies from a browser using yt-dlp's syntax "
+            "(e.g. 'safari', 'chrome:Profile 1', 'brave+keyring:Default')."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.cookies_file:
+        cookie_path = Path(args.cookies_file).expanduser()
+        if not cookie_path.exists():
+            parser.error(f"Cookies file not found: {cookie_path}")
+        args.cookies_file = str(cookie_path)
+
+    if args.cookies_from_browser:
+        try:
+            args.cookies_from_browser = parse_browser_cookie_spec(args.cookies_from_browser)
+        except ValueError as exc:  # pragma: no cover - validation error surfaces to user
+            parser.error(str(exc))
+
+    return args
+
+
+COOKIE_SPEC_RE = re.compile(
+    r"""
+    (?P<name>[^+:]+)              # browser name, e.g. chrome
+    (?:\s*\+\s*(?P<keyring>[^:]+))?   # optional keyring segment
+    (?:\s*:\s*(?!:)(?P<profile>.+?))? # optional profile after colon
+    (?:\s*::\s*(?P<container>.+))?    # optional container (Firefox)
+""",
+    re.VERBOSE,
+)
+
+
+def parse_browser_cookie_spec(spec: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    spec = spec.strip()
+    match = COOKIE_SPEC_RE.fullmatch(spec)
+    if not match:
+        raise ValueError(f"Invalid cookies-from-browser value: {spec!r}")
+
+    browser_name = match.group("name").lower()
+    if browser_name not in SUPPORTED_BROWSERS:
+        supported = ", ".join(sorted(SUPPORTED_BROWSERS))
+        raise ValueError(f'Unsupported browser "{browser_name}". Supported browsers: {supported}')
+
+    keyring = match.group("keyring")
+    if keyring is not None:
+        keyring = keyring.upper()
+        if keyring not in SUPPORTED_KEYRINGS:
+            supported = ", ".join(sorted(SUPPORTED_KEYRINGS))
+            raise ValueError(f'Unsupported keyring "{keyring}". Supported keyrings: {supported}')
+
+    profile = match.group("profile")
+    container = match.group("container")
+    return browser_name, profile, keyring, container
 
 
 def main() -> None:
     args = parse_args()
+    auth_opts: Dict[str, Any] = {}
+    if getattr(args, "cookies_file", None):
+        auth_opts["cookiefile"] = args.cookies_file
+    if getattr(args, "cookies_from_browser", None):
+        auth_opts["cookiesfrombrowser"] = args.cookies_from_browser
+    if auth_opts:
+        print("Cookies configured for yt-dlp requests.")
+    VideoInfoHandler.ydl_auth_opts = auth_opts
     server = ThreadingHTTPServer((args.host, args.port), VideoInfoHandler)
     print(f"Video downloader API running at http://{args.host}:{args.port}")
     print("Serving UI + API. UI: http://%s:%s/  Endpoint: GET /api/video-info?url=<YouTube URL>" % (args.host, args.port))
