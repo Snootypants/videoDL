@@ -6,53 +6,91 @@ const downloadMode = 'live'; // live -> hit backend endpoint
 const selectors = {
   url: document.getElementById('video-url'),
   location: document.getElementById('save-location'),
+  advancedToggle: document.getElementById('advanced-toggle'),
+  advancedPanel: document.getElementById('advanced-panel'),
+  authStatus: document.getElementById('auth-status'),
+  ytdlpVersion: document.getElementById('ytdlp-version'),
+  authGet: document.getElementById('auth-get'),
+  authError: document.getElementById('auth-error'),
   language: document.getElementById('language'),
   quality: document.getElementById('quality'),
   downloadBtn: document.getElementById('download-btn'),
   statusPill: document.getElementById('status-pill'),
   percentLabel: document.getElementById('percent-label'),
   progressFill: document.getElementById('progress-fill'),
+  progressSubline: document.getElementById('progress-subline'),
   title: document.getElementById('video-title'),
+  duration: document.getElementById('video-duration'),
+  host: document.getElementById('video-host'),
   description: document.getElementById('video-description'),
   thumbnail: document.getElementById('video-image'),
   downloadNote: document.getElementById('download-note'),
   form: document.getElementById('download-form')
 };
 
+const ADVANCED_PROMPT = 'Open Advanced to choose';
+const NO_VIDEO_PROMPT = 'Select a video first';
+const AUTH_SOURCE_LABEL = 'Auth source: Chrome';
 let fetchTimeout = null;
 let cachedFormats = [];
 let availableLanguages = [];
 let selectedLanguage = '';
+let selectedQuality = '';
 let currentSavePath = DEFAULT_SAVE_PATH;
 setDefaultSaveLocation();
 fetchDefaultPathFromApi();
+fetchDiagnosticsFromApi();
+setAdvancedAvailability(false);
+setAdvancedPrompt(NO_VIDEO_PROMPT);
+setAuthStatus({ ok: false });
+setAuthError(false);
+refreshAuthStatus();
 
 selectors.url.addEventListener('input', () => {
   selectors.downloadBtn.disabled = true;
-  selectors.quality.disabled = true;
-  selectors.quality.innerHTML = '<option value="">Fetching formats…</option>';
-  selectors.language.disabled = true;
-  selectors.language.innerHTML = '<option value="">Fetching languages…</option>';
 
   clearTimeout(fetchTimeout);
   const url = selectors.url.value.trim();
+  setAdvancedAvailability(false);
+  setAdvancedPrompt(url ? ADVANCED_PROMPT : NO_VIDEO_PROMPT);
   if (!url) {
+    cachedFormats = [];
+    availableLanguages = [];
+    selectedLanguage = '';
+    selectedQuality = '';
     resetVideoMeta();
-    resetLanguageSelect();
+    setAuthError(false);
     return;
   }
 
   fetchTimeout = setTimeout(() => fetchVideoInfo(url), 450);
 });
 
+selectors.advancedToggle.addEventListener('click', () => {
+  if (selectors.advancedToggle.disabled) {
+    return;
+  }
+  if (selectors.advancedPanel.classList.contains('is-collapsed')) {
+    expandAdvancedPanel();
+  } else {
+    collapseAdvancedPanel();
+  }
+});
+
+selectors.authGet.addEventListener('click', () => {
+  requestAuthGet();
+});
+
 selectors.language.addEventListener('change', () => {
   selectedLanguage = selectors.language.value;
-  populateQualityDropdown(cachedFormats, selectedLanguage);
+  populateQualityDropdown(cachedFormats, selectedLanguage, '');
 });
 
 selectors.form.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (!selectors.url.value || !selectors.location.value || !selectors.quality.value) {
+  const qualityValue = selectors.quality.value || selectedQuality;
+  const languageValue = selectors.language.value || selectedLanguage;
+  if (!selectors.url.value || !selectors.location.value || !qualityValue) {
     return;
   }
 
@@ -64,11 +102,12 @@ selectors.form.addEventListener('submit', async (event) => {
     stopProgress = beginPseudoProgress();
     const result = await requestDownload({
       url: selectors.url.value.trim(),
-      quality: selectors.quality.value,
+      quality: qualityValue,
       path: selectors.location.value.trim(),
-      language: selectors.language.value
+      language: languageValue
     });
     updateProgress(100, 'Download complete');
+    updateProgressDetails();
     updateDownloadNote(result?.filepath);
   } catch (error) {
     console.error(error);
@@ -77,6 +116,7 @@ selectors.form.addEventListener('submit', async (event) => {
     selectors.statusPill.style.borderColor = 'rgba(248,81,73,0.4)';
     selectors.percentLabel.textContent = '0%';
     selectors.progressFill.style.width = '0%';
+    updateProgressDetails();
   } finally {
     if (typeof stopProgress === 'function') {
       stopProgress();
@@ -86,12 +126,32 @@ selectors.form.addEventListener('submit', async (event) => {
 });
 
 async function fetchVideoInfo(url) {
+  if (!isValidUrl(url)) {
+    setAuthStatus({ ok: false, reason: 'Invalid URL' });
+    setAuthError(false);
+    setAdvancedAvailability(false);
+    setAdvancedPrompt(NO_VIDEO_PROMPT);
+    updateVideoMeta({
+      title: 'Invalid URL',
+      description: 'Invalid URL',
+      thumbnail: null,
+      label: 'Invalid URL',
+      host: null,
+      duration: null
+    });
+    return;
+  }
+  const host = deriveHostLabel(url);
   updateVideoMeta({
     title: 'Fetching video details…',
     description: 'Hang tight while we look up this video.',
     thumbnail: null,
-    label: 'Fetching preview…'
+    label: 'Fetching preview…',
+    host,
+    duration: null
   });
+  refreshAuthStatus(url);
+  setAuthError(false);
 
   try {
     const data = videoInfoMode === 'mock'
@@ -101,28 +161,58 @@ async function fetchVideoInfo(url) {
     cachedFormats = data.formats || [];
     availableLanguages = deriveLanguageOptions(data.languages, cachedFormats);
     selectedLanguage = pickDefaultLanguage(availableLanguages);
-    populateLanguageDropdown(availableLanguages, selectedLanguage);
-    populateQualityDropdown(cachedFormats, selectedLanguage);
+    selectedQuality = pickDefaultQuality(cachedFormats, selectedLanguage);
+    setAdvancedAvailability(true);
+    if (selectors.advancedPanel.classList.contains('is-collapsed')) {
+      setAdvancedPrompt(ADVANCED_PROMPT);
+    } else {
+      hydrateAdvancedOptions();
+    }
     updateVideoMeta({
       title: data.title || 'Untitled video',
       description: data.description || 'No description provided.',
       thumbnail: data.thumbnail || null,
-      label: 'No thumbnail available'
+      label: 'No thumbnail available',
+      host,
+      duration: data.duration
     });
+    setAuthError(false);
     selectors.downloadBtn.disabled = false;
   } catch (error) {
     console.error(error);
+    if (error?.code === 'AUTH_REQUIRED') {
+      setAuthStatus({ ok: false, reason: error.detail || 'Auth required' });
+      setAuthError(true);
+      selectedLanguage = '';
+      selectedQuality = '';
+      setAdvancedAvailability(false);
+      setAdvancedPrompt('Auth required');
+      updateVideoMeta({
+        title: 'Auth required',
+        description: 'Connect browser cookies to load metadata.',
+        thumbnail: null,
+        label: 'Auth required',
+        host,
+        duration: null
+      });
+      return;
+    }
     if (videoInfoMode === 'auto') {
       videoInfoMode = 'mock';
       console.warn('Falling back to mock data. Start web/server.py to hit the real API.');
       return fetchVideoInfo(url);
     }
-    resetLanguageSelect();
+    selectedLanguage = '';
+    selectedQuality = '';
+    setAdvancedAvailability(false);
+    setAdvancedPrompt(NO_VIDEO_PROMPT);
     updateVideoMeta({
       title: 'No data',
       description: 'We could not retrieve metadata for this URL. Double-check the link and try again.',
       thumbnail: null,
-      label: 'Preview unavailable'
+      label: 'Preview unavailable',
+      host,
+      duration: undefined
     });
   }
 }
@@ -130,9 +220,119 @@ async function fetchVideoInfo(url) {
 async function realVideoInfo(url) {
   const response = await fetch(`${API_BASE}/api/video-info?url=${encodeURIComponent(url)}`);
   if (!response.ok) {
-    throw new Error('Video info request failed');
+    const payload = await safeJson(response);
+    const error = new Error('Video info request failed');
+    error.code = payload?.error;
+    error.detail = payload?.detail;
+    throw error;
   }
   return response.json();
+}
+
+async function refreshAuthStatus(url = '') {
+  if (!url) {
+    setAuthStatus({ ok: false, reason: 'Needed' });
+    return;
+  }
+  if (!isValidUrl(url)) {
+    setAuthStatus({ ok: false, reason: 'Invalid URL' });
+    return;
+  }
+  try {
+    const query = url ? `?url=${encodeURIComponent(url)}` : '';
+    const response = await fetch(`${API_BASE}/api/auth-status${query}`);
+    if (!response.ok) {
+      throw new Error('Auth status request failed');
+    }
+    const data = await response.json();
+    setAuthStatus(data);
+  } catch (error) {
+    setAuthStatus({ ok: false, reason: 'Unavailable' });
+  }
+}
+
+async function requestAuthGet() {
+  const url = selectors.url.value.trim();
+  if (!isValidUrl(url)) {
+    setAuthStatus({ ok: false, reason: 'Invalid URL' });
+    setAuthError(false);
+    return;
+  }
+  selectors.authGet.disabled = true;
+  try {
+    const response = await fetch(`${API_BASE}/api/auth-get`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await safeJson(response);
+    setAuthStatus(data || { ok: false, reason: 'Unavailable' });
+    if (data?.ok && url) {
+      setAuthError(false);
+      videoInfoMode = 'auto';
+      fetchVideoInfo(url);
+    }
+  } catch (error) {
+    setAuthStatus({ ok: false, reason: 'Unavailable' });
+  } finally {
+    selectors.authGet.disabled = false;
+  }
+}
+
+function setAuthStatus({ ok, reason } = {}) {
+  const isOk = Boolean(ok);
+  if (isOk) {
+    selectors.authStatus.textContent = `${AUTH_SOURCE_LABEL} · Connected`;
+  } else {
+    const detail = reason || 'Needed';
+    selectors.authStatus.textContent = `${AUTH_SOURCE_LABEL} · ${detail}`;
+  }
+  selectors.authGet.hidden = false;
+}
+
+function setAuthError(show) {
+  if (!selectors.authError) {
+    return;
+  }
+  selectors.authError.hidden = !show;
+}
+
+async function safeJson(response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    return null;
+  }
+}
+
+function setAdvancedPrompt(message) {
+  selectors.language.innerHTML = `<option value="">${message}</option>`;
+  selectors.language.disabled = true;
+  selectors.quality.innerHTML = `<option value="">${message}</option>`;
+  selectors.quality.disabled = true;
+}
+
+function setAdvancedAvailability(isAvailable) {
+  selectors.advancedToggle.disabled = !isAvailable;
+  if (!isAvailable) {
+    collapseAdvancedPanel();
+  }
+}
+
+function collapseAdvancedPanel() {
+  selectors.advancedPanel.classList.add('is-collapsed');
+  selectors.advancedToggle.setAttribute('aria-expanded', 'false');
+}
+
+function expandAdvancedPanel() {
+  selectors.advancedPanel.classList.remove('is-collapsed');
+  selectors.advancedToggle.setAttribute('aria-expanded', 'true');
+  hydrateAdvancedOptions();
+}
+
+function hydrateAdvancedOptions() {
+  populateLanguageDropdown(availableLanguages, selectedLanguage);
+  populateQualityDropdown(cachedFormats, selectedLanguage, selectedQuality);
 }
 
 function populateLanguageDropdown(languages = [], defaultCode = '') {
@@ -157,7 +357,7 @@ function populateLanguageDropdown(languages = [], defaultCode = '') {
   selectors.language.disabled = languages.length <= 1;
 }
 
-function populateQualityDropdown(formats = [], languageCode = '') {
+function populateQualityDropdown(formats = [], languageCode = '', defaultQualityId = '') {
   selectors.quality.disabled = false;
   selectors.quality.innerHTML = '';
 
@@ -176,17 +376,25 @@ function populateQualityDropdown(formats = [], languageCode = '') {
   if (!filtered.length) {
     selectors.quality.innerHTML = '<option value="">No formats for this language</option>';
     selectors.quality.disabled = true;
+    selectedQuality = '';
+    return;
   }
+
+  const preferred = defaultQualityId && filtered.some((format) => format.id === defaultQualityId)
+    ? defaultQualityId
+    : filtered[0].id;
+  selectedQuality = preferred;
+  selectors.quality.value = selectedQuality;
 }
 
-function updateVideoMeta({ title, description, thumbnail, label }) {
+function updateVideoMeta({ title, description, thumbnail, label, host, duration }) {
   selectors.title.textContent = title;
   selectors.description.textContent = description;
+  updateMetaRows({ host, duration });
 
   const resolvedThumbnail = thumbnail || deriveYoutubeThumbnail(selectors.url.value.trim());
   if (resolvedThumbnail) {
-    selectors.thumbnail.style.backgroundImage =
-      `linear-gradient(rgba(0,0,0,0.15), rgba(0,0,0,0.15)), url('${resolvedThumbnail}')`;
+    selectors.thumbnail.style.backgroundImage = `url('${resolvedThumbnail}')`;
     selectors.thumbnail.dataset.empty = 'false';
     selectors.thumbnail.dataset.label = '';
   } else {
@@ -196,12 +404,37 @@ function updateVideoMeta({ title, description, thumbnail, label }) {
   }
 }
 
+function updateMetaRows({ host, duration }) {
+  const hostLabel = host || '—';
+  selectors.host.textContent = `Source: ${hostLabel}`;
+  selectors.duration.textContent = `Duration: ${formatDurationLabel(duration)}`;
+}
+
+function formatDurationLabel(duration) {
+  if (duration === null) {
+    return '—';
+  }
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return 'unknown';
+  }
+  const total = Math.round(duration);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 function resetVideoMeta() {
   updateVideoMeta({
     title: 'Paste a URL to preview',
     description: 'The title, description, duration, and available formats will appear here after we fetch details for the provided URL.',
     thumbnail: null,
-    label: 'Paste a URL to preview'
+    label: 'Paste a URL to preview',
+    host: null,
+    duration: null
   });
 }
 
@@ -209,6 +442,13 @@ function updateProgress(percent, label) {
   selectors.percentLabel.textContent = `${percent}%`;
   selectors.progressFill.style.width = `${percent}%`;
   selectors.statusPill.textContent = label;
+}
+
+function updateProgressDetails(speed = '—', eta = '—') {
+  if (!selectors.progressSubline) {
+    return;
+  }
+  selectors.progressSubline.textContent = `Speed: ${speed}   ETA: ${eta}`;
 }
 
 function updateDownloadNote(filepath) {
@@ -254,13 +494,12 @@ function pickDefaultLanguage(languages = []) {
   return english ? english.code : languages[0].code;
 }
 
-function resetLanguageSelect() {
-  selectors.language.innerHTML = '<option value="">Select a video first</option>';
-  selectors.language.disabled = true;
-  selectedLanguage = '';
-
-  selectors.quality.innerHTML = '<option value="">Select a video first</option>';
-  selectors.quality.disabled = true;
+function pickDefaultQuality(formats = [], languageCode = '') {
+  const filtered = formats.filter((format) => {
+    const lang = format.language || 'und';
+    return !languageCode || lang === languageCode;
+  });
+  return filtered[0]?.id || '';
 }
 
 function friendlyBasename(path = '') {
@@ -270,6 +509,26 @@ function friendlyBasename(path = '') {
   const segments = path.replace(/\\/g, '/').split('/');
   const last = segments.pop() || path;
   return last;
+}
+
+function deriveHostLabel(rawUrl) {
+  if (!rawUrl) {
+    return null;
+  }
+  try {
+    return new URL(rawUrl).hostname;
+  } catch (error) {
+    return null;
+  }
+}
+
+function isValidUrl(value = '') {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
 }
 
 function deriveYoutubeThumbnail(rawUrl) {
@@ -334,11 +593,46 @@ async function fetchDefaultPathFromApi() {
   }
 }
 
+async function fetchDiagnosticsFromApi() {
+  if (!selectors.ytdlpVersion) {
+    return;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/diagnostics`);
+    if (!response.ok) {
+      throw new Error('Diagnostics request failed');
+    }
+    const data = await response.json();
+    const ver = data?.yt_dlp?.version || 'unknown';
+    const warning = data?.yt_dlp?.warning || '';
+    const extractor = data?.extractor;
+    const suffix = warning ? ' (update)' : '';
+    selectors.ytdlpVersion.textContent = `yt-dlp: ${ver}${suffix}`;
+    const titleParts = [];
+    if (warning) {
+      titleParts.push(warning);
+    }
+    if (extractor) {
+      if (extractor.ok) {
+        titleParts.push(`${extractor.name || 'youtube'} extractor: ok`);
+      } else {
+        titleParts.push(`${extractor.name || 'youtube'} extractor: ${extractor.error || 'error'}`);
+      }
+    }
+    if (titleParts.length) {
+      selectors.ytdlpVersion.title = titleParts.join(' | ');
+    }
+  } catch (error) {
+    selectors.ytdlpVersion.textContent = 'yt-dlp: unavailable';
+  }
+}
+
 
 
 function beginPseudoProgress() {
   let percent = 5;
   updateProgress(percent, 'Downloading…');
+  updateProgressDetails();
   const timer = setInterval(() => {
     percent = Math.min(percent + Math.random() * 12, 93);
     updateProgress(Math.round(percent), 'Downloading…');
@@ -361,10 +655,10 @@ function mockVideoInfo(url) {
       }
 
       resolve({
-        title: 'Sample Video • ' + hostLabel,
-        description: `This is placeholder metadata for ${url}.
+        title: 'Video • ' + hostLabel,
+        description: `Metadata preview for ${url}.
 
-Once your API is wired up, disable the mock flag to show the real video title and description.`,
+If details look generic, the local API may still be starting.`,
         thumbnail: mockThumb,
         languages: [
           { code: 'en', label: 'English' },

@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
+import subprocess
 import sys
 import traceback
+from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +32,33 @@ for path in (PROJECT_ROOT, YTDLP_SOURCE):
         sys.path.insert(0, path_str)
 
 from yt_dlp import YoutubeDL  # type: ignore  # local package import
-from yt_dlp.cookies import SUPPORTED_BROWSERS, SUPPORTED_KEYRINGS  # type: ignore
+from yt_dlp import version as yt_dlp_version  # type: ignore
+from yt_dlp.cookies import SUPPORTED_KEYRINGS  # type: ignore
+
+AUTH_COOKIE_SOURCE = "chrome"
+AUTH_PROFILE_ENV = "VIDEO_DL_CHROME_PROFILE"
+
+
+def normalize_youtube_url(url: str) -> str:
+    """Return a canonical YouTube watch URL when possible."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+
+    host = (parsed.hostname or "").lower()
+    if host.endswith("youtu.be"):
+        video_id = (parsed.path or "").lstrip("/").split("/")[0]
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    if host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
+        qs = parse_qs(parsed.query)
+        video_id = (qs.get("v") or [""])[0]
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    return url
 
 
 def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -148,6 +177,156 @@ def pick_thumbnail(info: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+class AuthRequiredError(Exception):
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def get_chrome_profile() -> Optional[str]:
+    profile = os.environ.get(AUTH_PROFILE_ENV, "").strip()
+    return profile or None
+
+
+def cookie_cli_arg() -> str:
+    profile = get_chrome_profile()
+    return f"{AUTH_COOKIE_SOURCE}:{profile}" if profile else AUTH_COOKIE_SOURCE
+
+
+def cookie_spec() -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    profile = get_chrome_profile()
+    return (AUTH_COOKIE_SOURCE, profile, None, None)
+
+
+def validate_url(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def summarize_probe_error(message: str) -> str:
+    if not message:
+        return "Probe failed"
+    for line in message.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            if cleaned.lower().startswith("error:"):
+                cleaned = cleaned[6:].strip()
+            return cleaned[:240]
+    return "Probe failed"
+
+
+def ytdlp_version_payload() -> Dict[str, Any]:
+    """Expose yt-dlp build info for quick debugging."""
+    ver = getattr(yt_dlp_version, "__version__", "unknown")
+    age_days: Optional[int] = None
+    warning: Optional[str] = None
+
+    try:
+        parts = [int(p) for p in str(ver).split(".")[:3]]
+        built = date(parts[0], parts[1], parts[2])
+        age_days = (date.today() - built).days
+        if age_days >= 30:
+            warning = (
+                f"yt-dlp is {age_days} days old. If metadata broke recently, update the yt-dlp submodule "
+                "and restart the server."
+            )
+    except Exception:
+        pass
+
+    extractor_status: Dict[str, Any] = {"name": "youtube", "ok": True}
+    try:
+        from yt_dlp.extractor.youtube import YoutubeIE  # type: ignore
+
+        extractor_status["version"] = getattr(YoutubeIE, "_VERSION", None)
+    except Exception as exc:
+        extractor_status = {"name": "youtube", "ok": False, "error": str(exc)}
+
+    return {
+        "yt_dlp": {
+            "version": ver,
+            "age_days": age_days,
+            "warning": warning,
+        },
+        "extractor": extractor_status,
+    }
+
+
+def run_yt_dlp_probe(url: str) -> Tuple[bool, str]:
+    env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH", "")
+    entries = [str(PROJECT_ROOT), str(YTDLP_SOURCE)]
+    if pythonpath:
+        entries.append(pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(entries)
+    browser_arg = cookie_cli_arg()
+    canonical_url = normalize_youtube_url(url)
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "-J",
+        "--skip-download",
+        "--no-warnings",
+        "--ignore-config",
+        "--format",
+        "best",
+        "--noplaylist",
+        "--cookies-from-browser",
+        browser_arg,
+        canonical_url,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, summarize_probe_error(str(exc))
+    if result.returncode == 0:
+        return True, ""
+    stderr = result.stderr or result.stdout or ""
+    return False, summarize_probe_error(stderr)
+
+
+def auth_status_payload(url: Optional[str]) -> Dict[str, Any]:
+    if not url or not validate_url(url):
+        return {"ok": False, "browser": AUTH_COOKIE_SOURCE, "reason": "Invalid URL"}
+    ok, reason = run_yt_dlp_probe(url)
+    return {
+        "ok": ok,
+        "browser": AUTH_COOKIE_SOURCE,
+        "reason": "" if ok else reason,
+    }
+
+
+def auth_get_payload(url: str) -> Dict[str, Any]:
+    ok, reason = run_yt_dlp_probe(url)
+    return {
+        "ok": ok,
+        "browser": AUTH_COOKIE_SOURCE,
+        "reason": "" if ok else reason,
+    }
+
+
+def auth_error_detail(message: str) -> Optional[str]:
+    if not message:
+        return None
+    lowered = message.lower()
+    if "sign in to confirm" in lowered or "not a bot" in lowered:
+        return summarize_probe_error(message)
+    if "http error 403" in lowered or "403 forbidden" in lowered or "status code 403" in lowered:
+        return summarize_probe_error(message)
+    return None
+
 class VideoInfoHandler(BaseHTTPRequestHandler):
     server_version = "VideoDLServer/0.1"
     ydl_auth_opts: Dict[str, Any] = {}
@@ -155,6 +334,13 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         "quiet": True,
         "nocheckcertificate": True,
         "no_warnings": True,
+        "ignoreconfig": True,
+        # Keep metadata and download on the same YouTube client profile set.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android", "tv"],
+            }
+        },
     }
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -169,6 +355,9 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/download":
             self._handle_download()
+            return
+        if parsed.path == "/api/auth-get":
+            self._handle_auth_get()
             return
 
         self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
@@ -191,14 +380,24 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
 
             try:
                 payload = self._extract_info(url)
+            except AuthRequiredError as exc:
+                self._send_json({"error": "AUTH_REQUIRED", "detail": exc.detail}, HTTPStatus.UNAUTHORIZED)
+                return
             except Exception as exc:  # pragma: no cover - surface raw error to caller
                 self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
 
             self._send_json(payload, HTTPStatus.OK)
+        elif parsed.path == "/api/auth-status":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            payload = auth_status_payload(url or None)
+            self._send_json(payload, HTTPStatus.OK)
         elif parsed.path == "/api/default-path":
             default_path = str((Path.home() / "Downloads").expanduser())
             self._send_json({"path": default_path}, HTTPStatus.OK)
+        elif parsed.path == "/api/diagnostics":
+            self._send_json(ytdlp_version_payload(), HTTPStatus.OK)
         else:
             self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
             return
@@ -230,11 +429,38 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
 
         try:
             result = self._download_video(url, quality, save_dir)
+        except AuthRequiredError as exc:
+            self._send_json({"error": "AUTH_REQUIRED", "detail": exc.detail}, HTTPStatus.UNAUTHORIZED)
+            return
         except Exception as exc:  # pragma: no cover - surfaces yt-dlp errors
             traceback.print_exc()
             self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        self._send_json(result, HTTPStatus.OK)
+
+    def _handle_auth_get(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError:
+            self._send_json({"error": "Invalid JSON payload"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        url = (payload.get("url") or "").strip()
+        if not validate_url(url):
+            self._send_json(
+                {"ok": False, "browser": AUTH_COOKIE_SOURCE, "reason": "Invalid URL"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        result = auth_get_payload(url)
         self._send_json(result, HTTPStatus.OK)
 
     def _serve_static(self, path: str) -> None:
@@ -259,9 +485,21 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _extract_info(self, url: str) -> Dict[str, Any]:
-        ydl_opts = self._compose_ydl_opts(skip_download=True)
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        canonical_url = normalize_youtube_url(url)
+        ydl_opts = self._compose_ydl_opts(
+            skip_download=True,
+            format="best",
+            noplaylist=True,
+            extract_flat=False,
+        )
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(canonical_url, download=False)
+        except Exception as exc:
+            detail = auth_error_detail(str(exc))
+            if detail:
+                raise AuthRequiredError(detail)
+            raise
 
         return {
             "title": info.get("title"),
@@ -287,9 +525,15 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             noprogress=True,
         )
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        except Exception as exc:
+            detail = auth_error_detail(str(exc))
+            if detail:
+                raise AuthRequiredError(detail)
+            raise
         return {
             "status": "ok",
             "title": info.get("title"),
@@ -317,6 +561,18 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         opts: Dict[str, Any] = dict(self.base_ydl_opts)
         opts.update(self.ydl_auth_opts)
         opts.update(overrides)
+        # Cookie precedence: CLI cookiefile -> CLI cookiesfrombrowser -> default chrome cookies.
+        if "cookiefile" in self.ydl_auth_opts:
+            opts.pop("cookiesfrombrowser", None)
+        elif "cookiesfrombrowser" in self.ydl_auth_opts:
+            opts.pop("cookiefile", None)
+        elif "cookiefile" in opts:
+            opts.pop("cookiesfrombrowser", None)
+        elif "cookiesfrombrowser" in opts:
+            opts.pop("cookiefile", None)
+        else:
+            opts["cookiesfrombrowser"] = cookie_spec()
+            opts.pop("cookiefile", None)
         return opts
 
 
@@ -374,9 +630,8 @@ def parse_browser_cookie_spec(spec: str) -> Tuple[str, Optional[str], Optional[s
         raise ValueError(f"Invalid cookies-from-browser value: {spec!r}")
 
     browser_name = match.group("name").lower()
-    if browser_name not in SUPPORTED_BROWSERS:
-        supported = ", ".join(sorted(SUPPORTED_BROWSERS))
-        raise ValueError(f'Unsupported browser "{browser_name}". Supported browsers: {supported}')
+    if browser_name != AUTH_COOKIE_SOURCE:
+        raise ValueError(f'Unsupported browser "{browser_name}". Only "{AUTH_COOKIE_SOURCE}" is supported.')
 
     keyring = match.group("keyring")
     if keyring is not None:

@@ -10,6 +10,12 @@
   <div class="shell">
     <section class="panel">
       <h1>Video Downloader</h1>
+      <p class="helper">Paste a URL, preview loads automatically.</p>
+      <div class="auth-row">
+        <span class="auth-status" id="auth-status">Auth source: Chrome</span>
+        <span class="auth-version" id="ytdlp-version" title="yt-dlp build used by the local API">yt-dlp: —</span>
+        <button class="button-secondary button-inline" id="auth-get" type="button">Get</button>
+      </div>
       <form id="download-form" autocomplete="off">
         <div class="field">
           <label for="video-url">YouTube URL</label>
@@ -18,18 +24,24 @@
 
         <input id="save-location" name="path" type="hidden">
 
-        <div class="field">
-          <label for="language">Language</label>
-          <select id="language" name="language" disabled>
-            <option value="">Select a video first</option>
-          </select>
-        </div>
+        <button class="button-secondary" id="advanced-toggle" type="button" disabled>
+          Advanced
+        </button>
 
-        <div class="field">
-          <label for="quality">Video Quality</label>
-          <select id="quality" name="quality" disabled>
-            <option value="">Select a video first</option>
-          </select>
+        <div class="advanced-panel is-collapsed" id="advanced-panel">
+          <div class="field">
+            <label for="language">Language</label>
+            <select id="language" name="language" disabled>
+              <option value="">Select a video first</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="quality">Video Quality</label>
+            <select id="quality" name="quality" disabled>
+              <option value="">Select a video first</option>
+            </select>
+          </div>
         </div>
 
         <button id="download-btn" type="submit" disabled>Download Video</button>
@@ -42,6 +54,7 @@
           <div class="progress-bar">
             <div class="progress-fill" id="progress-fill"></div>
           </div>
+          <div class="progress-subline" id="progress-subline">Speed: —   ETA: —</div>
         </div>
 
         <div class="download-note" id="download-note">
@@ -51,7 +64,7 @@
     </section>
 
     <section class="panel video-meta">
-      <div class="meta-heading">Video Preview</div>
+      <div class="meta-heading">Video preview</div>
       <div class="meta-block" id="video-summary">
         <div
           class="preview-image"
@@ -61,6 +74,13 @@
           aria-label="Video thumbnail preview"
         ></div>
         <div class="meta-title" id="video-title">Paste a URL to preview</div>
+        <div class="meta-rows">
+          <div class="meta-row" id="video-duration">Duration: —</div>
+          <div class="meta-row" id="video-host">Source: —</div>
+        </div>
+        <div class="meta-error" id="auth-error" hidden>
+          YouTube blocked anonymous access. Click Get to use browser cookies.
+        </div>
         <div class="meta-desc" id="video-description">
           The title, description, duration, and available formats will appear here after we fetch details for the provided URL.
         </div>
