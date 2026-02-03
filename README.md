@@ -78,6 +78,7 @@ The server hosts both the web UI and API endpoints at http://127.0.0.1:5050.
 ```bash
 python web/server.py [OPTIONS]
 
+--host HOST              Interface to bind (default: 127.0.0.1)
 --port PORT              Server port (default: 5050)
 --cookies-from-browser   Load cookies from browser, e.g. "chrome:Profile 1" or "firefox"
 --cookies-file PATH      Load cookies from Netscape-format file
