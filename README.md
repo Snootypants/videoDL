@@ -1,6 +1,9 @@
 # VideoDL
 
-Local, no-API-key video downloader with a clean web UI backed by [`yt-dlp`](https://github.com/yt-dlp/yt-dlp).
+A local video downloader with a clean web UI, powered by [`yt-dlp`](https://github.com/yt-dlp/yt-dlp). No API keys, no external services—everything runs on your machine.
+
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ## Quick Start
 ```bash
@@ -18,6 +21,13 @@ Then open http://127.0.0.1:5050 in your browser.
 - **Browser Cookie Auth** — Access age-restricted or private videos using cookies from Chrome, Firefox, or Safari
 - **No API Keys** — Runs entirely locally with yt-dlp, no external service dependencies
 - **Auto-Merge** — Uses ffmpeg to combine video and audio streams into a single file
+
+## Supported Sites
+VideoDL uses yt-dlp under the hood, which supports **1000+ sites** including:
+- YouTube, YouTube Music, YouTube Shorts
+- Vimeo, Dailymotion, Twitch
+- Twitter/X, Reddit, Instagram, TikTok
+- And [many more](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
 
 ## How it works
 ```
@@ -127,3 +137,11 @@ The server exposes a simple REST API:
 - The server binds to `127.0.0.1` only (local access)
 - Files save as `%(title)s.%(ext)s` in the configured download directory
 - The UI debounces URL input to avoid excessive API calls
+
+## Tech Stack
+- **Backend:** Python 3.10+ with built-in `http.server`
+- **Frontend:** Vanilla JavaScript, HTML5, CSS3 (no frameworks)
+- **Core:** yt-dlp (as git submodule) + ffmpeg
+
+## License
+This project uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) which is licensed under the Unlicense.
