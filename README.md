@@ -7,15 +7,17 @@ Local, no-API-key video downloader with a clean web UI backed by [`yt-dlp`](http
 git clone https://github.com/Snootypants/videoDL.git && cd videoDL
 git submodule update --init --recursive
 brew install ffmpeg  # or: apt-get install ffmpeg / choco install ffmpeg
-python web/server.py --port 5050
-python -m webbrowser http://127.0.0.1:5050
+python web/server.py
 ```
+Then open http://127.0.0.1:5050 in your browser.
 
-## Highlights
-- Web UI that previews metadata and formats
-- Local API server that downloads with `yt-dlp`
-- Saves as `%(title)s.%(ext)s` in your chosen directory
-- No external Google/YouTube API keys needed
+## Features
+- **Live Preview** — Thumbnail, title, duration, and description shown as you paste a URL
+- **Format Selection** — Choose from curated quality options with resolution, FPS, codec, and bitrate info
+- **Multi-Language Audio** — Select from available audio tracks when videos have multiple languages
+- **Browser Cookie Auth** — Access age-restricted or private videos using cookies from Chrome, Firefox, or Safari
+- **No API Keys** — Runs entirely locally with yt-dlp, no external service dependencies
+- **Auto-Merge** — Uses ffmpeg to combine video and audio streams into a single file
 
 ## How it works
 ```
@@ -57,23 +59,33 @@ Or download a static build from [ffmpeg.org](https://ffmpeg.org/download.html) a
 
 ## Run
 ```bash
-python web/server.py --port 5050
+python web/server.py
 ```
 
-The server hosts both the web UI and API endpoints, so you do not need to open `web/index.html` directly.
+The server hosts both the web UI and API endpoints at http://127.0.0.1:5050.
 
-Open the UI:
+### Command-Line Options
+```bash
+python web/server.py [OPTIONS]
+
+--port PORT              Server port (default: 5050)
+--cookies-from-browser   Load cookies from browser, e.g. "chrome:Profile 1" or "firefox"
+--cookies-file PATH      Load cookies from Netscape-format file
 ```
-http://127.0.0.1:5050
+
+Example with authentication:
+```bash
+python web/server.py --cookies-from-browser "chrome:Default"
 ```
 
 ## Usage
-1. Paste a YouTube URL.
-2. Pick language (some videos have multiple audio tracks) and quality.
-3. Click **Download Video**.
+1. Paste a YouTube URL into the input field
+2. Wait for the preview to load (metadata fetches automatically)
+3. (Optional) Click **Advanced** to select language and quality
+4. Click **Download Video**
+5. Files save to `~/Downloads` as `Title.ext`
 
-The UI currently sends a hidden save location that defaults to `~/Downloads` and is not user-configurable yet.
-The server saves files as `%(title)s.%(ext)s` in that directory.
+For age-restricted or private videos, start the server with `--cookies-from-browser` to authenticate.
 
 ## Troubleshooting
 - **403 Forbidden from YouTube**
@@ -99,8 +111,19 @@ The server saves files as `%(title)s.%(ext)s` in that directory.
 git submodule update --remote yt-dlp
 ```
 
+## API Endpoints
+The server exposes a simple REST API:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/video-info?url=...` | GET | Fetch video metadata, formats, and available languages |
+| `/api/download` | POST | Download video with `{ "url", "quality", "language", "path" }` |
+| `/api/auth-status?url=...` | GET | Check if URL is accessible or requires authentication |
+| `/api/auth-get` | POST | Validate browser cookies for restricted content |
+| `/api/default-path` | GET | Returns default save location |
+| `/api/diagnostics` | GET | Returns yt-dlp version info |
+
 ## Notes
-- The server is local-only by default (`127.0.0.1`).
-- The API exposes:
-  - `GET /api/video-info?url=...`
-  - `POST /api/download` with JSON `{ "url", "quality", "path" }`
+- The server binds to `127.0.0.1` only (local access)
+- Files save as `%(title)s.%(ext)s` in the configured download directory
+- The UI debounces URL input to avoid excessive API calls
