@@ -62,54 +62,56 @@ def normalize_youtube_url(url: str) -> str:
 
 
 def build_format_options(info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Return a curated, de-duplicated set of progressive formats for the dropdown."""
+    """Return resolution-tier options that use yt-dlp's DASH merge (bestvideo+bestaudio).
+
+    Instead of listing individual progressive streams (which cap at ~720p on modern
+    YouTube), we detect which resolutions are actually available and offer clean tiers.
+    """
     formats = info.get("formats") or []
-    progressive = [
-        fmt
-        for fmt in formats
-        if fmt.get("vcodec") not in (None, "none")
-        and fmt.get("acodec") not in (None, "none")
-        and fmt.get("format_id")
+
+    # Collect available video heights (DASH or progressive)
+    available_heights: set = set()
+    for fmt in formats:
+        if fmt.get("vcodec") not in (None, "none") and fmt.get("height"):
+            available_heights.add(fmt["height"])
+
+    # Define tiers from highest to lowest
+    TIERS = [
+        (2160, "4K (2160p)"),
+        (1440, "1440p"),
+        (1080, "1080p"),
+        (720,  "720p"),
+        (480,  "480p"),
+        (360,  "360p"),
     ]
 
-    best_per_bucket: Dict[tuple, Dict[str, Any]] = {}
-    for fmt in progressive:
-        bucket = (
-            fmt.get("height"),
-            int(fmt.get("fps") or 0),
-            fmt.get("dynamic_range"),
-            fmt.get("ext"),
-            fmt.get("language") or "und",
-        )
-        current_best = best_per_bucket.get(bucket)
-        if current_best is None or (fmt.get("tbr") or 0) > (current_best.get("tbr") or 0):
-            best_per_bucket[bucket] = fmt
-
-    deduped = sorted(
-        best_per_bucket.values(),
-        key=lambda fmt: ((fmt.get("height") or 0), (fmt.get("fps") or 0), (fmt.get("tbr") or 0)),
-        reverse=True,
-    )
-
     options: List[Dict[str, Any]] = []
-    for fmt in deduped[:12]:
-        options.append(
-            {
-                "id": fmt["format_id"],
-                "label": describe_format(fmt),
-                "ext": fmt.get("ext", info.get("ext", "mp4")),
-                "language": fmt.get("language") or "und",
-            }
-        )
 
-    if not options:
-        options.append(
-            {
-                "id": info.get("format_id") or "bestvideo+bestaudio/best",
-                "label": "Best available",
-                "ext": info.get("ext", "mp4"),
-            }
-        )
+    # Always offer "Best Available" as default
+    options.append({
+        "id": "bestvideo+bestaudio/best",
+        "label": "Best Available (mkv)",
+        "ext": "mkv",
+        "format_string": "bestvideo+bestaudio/best",
+    })
+
+    # Add tiers where at least one format matches
+    for height, label in TIERS:
+        if any(h >= height for h in available_heights):
+            options.append({
+                "id": f"tier_{height}",
+                "label": f"{label} (mp4)",
+                "ext": "mp4",
+                "format_string": f"bestvideo[height<={height}]+bestaudio/best",
+            })
+
+    # Audio-only option
+    options.append({
+        "id": "bestaudio",
+        "label": "Audio only (m4a)",
+        "ext": "m4a",
+        "format_string": "bestaudio/best",
+    })
 
     return options
 
@@ -175,6 +177,32 @@ def pick_thumbnail(info: Dict[str, Any]) -> Optional[str]:
         return f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
 
     return None
+
+
+def format_speed(speed: Optional[float]) -> str:
+    """Format download speed in human-readable form."""
+    if not speed:
+        return "—"
+    if speed >= 1_000_000:
+        return f"{speed / 1_000_000:.1f} MB/s"
+    if speed >= 1_000:
+        return f"{speed / 1_000:.0f} KB/s"
+    return f"{speed:.0f} B/s"
+
+
+def format_eta(eta: Optional[int]) -> str:
+    """Format ETA seconds into mm:ss or hh:mm:ss."""
+    if eta is None:
+        return "—"
+    eta = int(eta)
+    if eta <= 0:
+        return "—"
+    hours = eta // 3600
+    minutes = (eta % 3600) // 60
+    seconds = eta % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 class AuthRequiredError(Exception):
@@ -273,9 +301,9 @@ def run_yt_dlp_probe(url: str) -> Tuple[bool, str]:
         "--skip-download",
         "--no-warnings",
         "--ignore-config",
-        "--format",
-        "best",
-        "--noplaylist",
+        "--no-playlist",
+        "--js-runtimes", "node",
+        "--remote-components", "ejs:github",
         "--cookies-from-browser",
         browser_arg,
         canonical_url,
@@ -335,12 +363,11 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         "nocheckcertificate": True,
         "no_warnings": True,
         "ignoreconfig": True,
-        # Keep metadata and download on the same YouTube client profile set.
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web", "android", "tv"],
-            }
-        },
+        # YouTube requires JS challenge solving for signatures/n-parameter.
+        # Since yt-dlp is loaded from a git submodule (not PyPI), EJS scripts
+        # aren't bundled — fetch them from GitHub on first use.
+        "js_runtimes": {"node": {}},
+        "remote_components": {"ejs:github"},
     }
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -356,11 +383,21 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/download":
             self._handle_download()
             return
+        if parsed.path == "/api/download-stream":
+            self._handle_download_stream()
+            return
         if parsed.path == "/api/auth-get":
             self._handle_auth_get()
             return
 
         self.send_error(HTTPStatus.NOT_FOUND.value, "Endpoint not found")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - CORS preflight
+        self.send_response(HTTPStatus.NO_CONTENT.value)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003 - keeping name for BaseHTTPRequestHandler
         sys.stdout.write(
@@ -417,6 +454,7 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
 
         url = (payload.get("url") or "").strip()
         quality = (payload.get("quality") or "").strip()
+        format_string = (payload.get("format_string") or "").strip()
         target = (payload.get("path") or "").strip()
         language = (payload.get("language") or "").strip()
 
@@ -428,7 +466,7 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            result = self._download_video(url, quality, save_dir)
+            result = self._download_video(url, quality, save_dir, format_string=format_string)
         except AuthRequiredError as exc:
             self._send_json({"error": "AUTH_REQUIRED", "detail": exc.detail}, HTTPStatus.UNAUTHORIZED)
             return
@@ -438,6 +476,116 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(result, HTTPStatus.OK)
+
+    def _handle_download_stream(self) -> None:
+        """SSE endpoint that streams real yt-dlp progress to the frontend."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_length = 0
+
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "Invalid JSON payload"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        url = (payload.get("url") or "").strip()
+        quality = (payload.get("quality") or "").strip()
+        format_string = (payload.get("format_string") or "").strip()
+        target = (payload.get("path") or "").strip()
+
+        if not url:
+            self._send_json({"error": "Missing url"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        save_dir = self._resolve_save_dir(target)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Set up SSE response
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        def send_event(data: Dict[str, Any]) -> None:
+            try:
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def progress_hook(d: Dict[str, Any]) -> None:
+            status = d.get("status", "")
+            if status == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                downloaded = d.get("downloaded_bytes", 0)
+                percent = round((downloaded / total * 100), 1) if total else 0
+                speed = d.get("speed")
+                eta = d.get("eta")
+                send_event({
+                    "type": "progress",
+                    "percent": percent,
+                    "speed": format_speed(speed),
+                    "eta": format_eta(eta),
+                    "status": "downloading",
+                })
+            elif status == "finished":
+                send_event({
+                    "type": "progress",
+                    "percent": 100,
+                    "speed": "—",
+                    "eta": "—",
+                    "status": "merging",
+                })
+
+        # Build format string
+        if format_string:
+            fmt = format_string
+        elif quality:
+            fmt = f"{quality}/bestvideo+bestaudio/best"
+        else:
+            fmt = "bestvideo+bestaudio/best"
+
+        merge_fmt = "mp4"
+        if fmt == "bestvideo+bestaudio/best":
+            merge_fmt = "mkv"
+        elif "bestaudio" in fmt and "bestvideo" not in fmt:
+            merge_fmt = None
+
+        output_template = str(save_dir / "%(title)s.%(ext)s")
+        extra_opts: Dict[str, Any] = {
+            "format": fmt,
+            "outtmpl": output_template,
+            "paths": {"home": str(save_dir)},
+            "noprogress": True,
+            "progress_hooks": [progress_hook],
+        }
+        if merge_fmt:
+            extra_opts["merge_output_format"] = merge_fmt
+
+        ydl_opts = self._compose_ydl_opts(**extra_opts)
+
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+
+            send_event({
+                "type": "complete",
+                "title": info.get("title"),
+                "filepath": filename,
+                "format_id": info.get("format_id"),
+            })
+        except Exception as exc:
+            detail = auth_error_detail(str(exc))
+            send_event({
+                "type": "error",
+                "error": detail or str(exc),
+            })
 
     def _handle_auth_get(self) -> None:
         try:
@@ -488,7 +636,6 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
         canonical_url = normalize_youtube_url(url)
         ydl_opts = self._compose_ydl_opts(
             skip_download=True,
-            format="best",
             noplaylist=True,
             extract_flat=False,
         )
@@ -511,19 +658,33 @@ class VideoInfoHandler(BaseHTTPRequestHandler):
             "languages": build_language_options(info),
         }
 
-    def _download_video(self, url: str, quality: str, save_dir: Path) -> Dict[str, Any]:
-        if quality:
+    def _download_video(self, url: str, quality: str, save_dir: Path, format_string: str = "") -> Dict[str, Any]:
+        # Use the format_string from the tier if provided, else fall back
+        if format_string:
+            fmt = format_string
+        elif quality:
             fmt = f"{quality}/bestvideo+bestaudio/best"
         else:
             fmt = "bestvideo+bestaudio/best"
+
+        # Determine merge format based on the format string
+        merge_fmt = "mp4"
+        if fmt == "bestvideo+bestaudio/best":
+            merge_fmt = "mkv"  # Best available keeps original quality
+        elif "bestaudio" in fmt and "bestvideo" not in fmt:
+            merge_fmt = None  # Audio-only, no merge needed
+
         output_template = str(save_dir / "%(title)s.%(ext)s")
-        ydl_opts = self._compose_ydl_opts(
-            format=fmt,
-            outtmpl=output_template,
-            paths={"home": str(save_dir)},
-            merge_output_format="mp4",
-            noprogress=True,
-        )
+        extra_opts: Dict[str, Any] = {
+            "format": fmt,
+            "outtmpl": output_template,
+            "paths": {"home": str(save_dir)},
+            "noprogress": True,
+        }
+        if merge_fmt:
+            extra_opts["merge_output_format"] = merge_fmt
+
+        ydl_opts = self._compose_ydl_opts(**extra_opts)
 
         try:
             with YoutubeDL(ydl_opts) as ydl:

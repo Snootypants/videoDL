@@ -94,15 +94,19 @@ selectors.form.addEventListener('submit', async (event) => {
     return;
   }
 
+  // Look up the format_string for the selected quality tier
+  const selectedFormat = cachedFormats.find((f) => f.id === qualityValue);
+  const formatString = selectedFormat?.format_string || '';
+
   selectors.downloadBtn.disabled = true;
   updateProgress(0, 'Starting download…');
+  updateProgressDetails();
 
-  let stopProgress = null;
   try {
-    stopProgress = beginPseudoProgress();
-    const result = await requestDownload({
+    const result = await requestDownloadStream({
       url: selectors.url.value.trim(),
       quality: qualityValue,
+      format_string: formatString,
       path: selectors.location.value.trim(),
       language: languageValue
     });
@@ -118,9 +122,6 @@ selectors.form.addEventListener('submit', async (event) => {
     selectors.progressFill.style.width = '0%';
     updateProgressDetails();
   } finally {
-    if (typeof stopProgress === 'function') {
-      stopProgress();
-    }
     selectors.downloadBtn.disabled = false;
   }
 });
@@ -362,14 +363,15 @@ function populateQualityDropdown(formats = [], languageCode = '', defaultQuality
   selectors.quality.innerHTML = '';
 
   const filtered = formats.filter((format) => {
-    const lang = format.language || 'und';
+    if (!format.language) return true; // tier-based formats (no language) always show
+    const lang = format.language;
     return !languageCode || lang === languageCode;
   });
 
   filtered.forEach((format) => {
     const option = document.createElement('option');
     option.value = format.id;
-    option.textContent = `${format.label} (${format.ext})`;
+    option.textContent = format.label;
     selectors.quality.appendChild(option);
   });
 
@@ -496,7 +498,8 @@ function pickDefaultLanguage(languages = []) {
 
 function pickDefaultQuality(formats = [], languageCode = '') {
   const filtered = formats.filter((format) => {
-    const lang = format.language || 'und';
+    if (!format.language) return true; // tier-based formats (no language) always show
+    const lang = format.language;
     return !languageCode || lang === languageCode;
   });
   return filtered[0]?.id || '';
@@ -557,8 +560,8 @@ function deriveYoutubeThumbnail(rawUrl) {
   }
 }
 
-async function requestDownload(payload) {
-  const response = await fetch(`${API_BASE}/api/download`, {
+async function requestDownloadStream(payload) {
+  const response = await fetch(`${API_BASE}/api/download-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -568,7 +571,42 @@ async function requestDownload(payload) {
     throw new Error('Download request failed');
   }
 
-  return response.json();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      let event;
+      try {
+        event = JSON.parse(line.slice(6));
+      } catch (e) {
+        continue;
+      }
+
+      if (event.type === 'progress') {
+        const percent = Math.round(event.percent || 0);
+        const label = event.status === 'merging' ? 'Merging audio + video…' : 'Downloading…';
+        updateProgress(percent, label);
+        updateProgressDetails(event.speed || '—', event.eta || '—');
+      } else if (event.type === 'complete') {
+        result = event;
+      } else if (event.type === 'error') {
+        throw new Error(event.error || 'Download failed');
+      }
+    }
+  }
+
+  return result;
 }
 
 function setDefaultSaveLocation(path = DEFAULT_SAVE_PATH) {
@@ -629,16 +667,7 @@ async function fetchDiagnosticsFromApi() {
 
 
 
-function beginPseudoProgress() {
-  let percent = 5;
-  updateProgress(percent, 'Downloading…');
-  updateProgressDetails();
-  const timer = setInterval(() => {
-    percent = Math.min(percent + Math.random() * 12, 93);
-    updateProgress(Math.round(percent), 'Downloading…');
-  }, 600);
-  return () => clearInterval(timer);
-}
+// beginPseudoProgress removed — real progress comes from SSE stream
 
 // --- Mock helpers below keep the UI interactive until endpoints exist ---
 function mockVideoInfo(url) {
